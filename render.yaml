@@ -1,9 +1,12 @@
 services:
-  - type: background
+  - type: web
     name: dcbot
     env: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt aiohttp
     startCommand: python bot.py
     envVars:
       - key: DISCORD_TOKEN
         fromSecret: discord_token
+    ports:
+      - port: 8080
+        protocol: http
