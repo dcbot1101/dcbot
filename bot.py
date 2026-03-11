@@ -33,8 +33,17 @@ async def run_web():
 async def on_ready():
     print(f"Bot logged in as {bot.user}")
     await bot.add_cog(MusicCog(bot))
-    await bot.tree.sync()
-    print("Commands synced!")
+    
+    # Sync commands to specific guilds for instant availability
+    if config.GUILD_IDS:
+        for guild_id in config.GUILD_IDS:
+            guild = discord.Object(id=guild_id)
+            await bot.tree.sync(guild=guild)
+            print(f"Commands synced to guild {guild_id}!")
+    else:
+        # Fallback to global sync if no guilds specified
+        await bot.tree.sync()
+        print("Commands synced globally!")
 
 
 async def main():
