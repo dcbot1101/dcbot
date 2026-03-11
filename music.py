@@ -19,6 +19,7 @@ ytdl_format_options = {
 }
 
 ffmpeg_options = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn -filter:a volume=0.5',
 }
 
@@ -49,15 +50,37 @@ class MusicQueue:
         self.queue = []
         self.current = None
         self.playing = False
+        self.disconnect_task = None
+        self.voice_client = None
 
     def add(self, source):
         self.queue.append(source)
+        self._cancel_disconnect()
 
     def next(self):
         if self.queue:
             self.current = self.queue.pop(0)
             return self.current
         return None
+
+    def start_disconnect_timer(self, vc, loop):
+        """Start a timer to disconnect after 5 minutes of inactivity"""
+        self.voice_client = vc
+        self._cancel_disconnect()
+        self.disconnect_task = loop.create_task(self._disconnect_after_delay(vc))
+
+    def _cancel_disconnect(self):
+        """Cancel the disconnect timer if it exists"""
+        if self.disconnect_task and not self.disconnect_task.done():
+            self.disconnect_task.cancel()
+            self.disconnect_task = None
+
+    async def _disconnect_after_delay(self, vc, delay=300):
+        """Disconnect from voice channel after delay seconds (default 5 minutes)"""
+        await asyncio.sleep(delay)
+        if vc and vc.is_connected():
+            await vc.disconnect()
+            print(f"Auto-disconnected from {vc.guild.name} after inactivity")
 
 
 queues = {}
@@ -108,6 +131,7 @@ class MusicCog(commands.Cog):
 
         if not source:
             queue.playing = False
+            queue.start_disconnect_timer(vc, self.bot.loop)
             return
 
         queue.playing = True
@@ -131,20 +155,38 @@ class MusicCog(commands.Cog):
     @app_commands.command(name="queue", description="Show the queue")
     async def queue(self, interaction: discord.Interaction):
         queue = get_queue(interaction.guild_id)
-        if not queue.queue:
+        if not queue.queue and not queue.current:
             await interaction.response.send_message("Queue is empty!")
             return
 
         embed = discord.Embed(title="Queue")
+
+        if queue.current:
+            embed.add_field(name="Now Playing", value=f"{queue.current.title}", inline=False)
+
         for i, item in enumerate(queue.queue, 1):
             embed.add_field(name=f"{i}. {item.title}", value="\u200b", inline=False)
 
         await interaction.response.send_message(embed=embed)
 
+    @app_commands.command(name="clear", description="Clear the queue")
+    async def clear(self, interaction: discord.Interaction):
+        queue = get_queue(interaction.guild_id)
+        queue.queue.clear()
+        
+        # If nothing is playing, start disconnect timer
+        vc = interaction.guild.voice_client
+        if vc and not queue.playing:
+            queue.start_disconnect_timer(vc, self.bot.loop)
+        
+        await interaction.response.send_message("Queue cleared!")
+
     @app_commands.command(name="leave", description="Leave the voice channel")
     async def leave(self, interaction: discord.Interaction):
         vc = interaction.guild.voice_client
         if vc:
+            queue = get_queue(interaction.guild_id)
+            queue._cancel_disconnect()  # Cancel any pending disconnect
             await vc.disconnect()
             await interaction.response.send_message("Left!")
         else:
