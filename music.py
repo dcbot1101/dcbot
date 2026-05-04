@@ -3,6 +3,10 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import yt_dlp
+import logging
+import traceback
+
+logger = logging.getLogger('music')
 
 ytdl_format_options = {
     'format': 'bestaudio/best',
@@ -17,6 +21,11 @@ ytdl_format_options = {
     'default_search': 'auto',
     'source_address': '0.0.0.0',
 }
+
+# Debug version with more verbose output
+ytdl_debug_options = ytdl_format_options.copy()
+ytdl_debug_options['quiet'] = False
+ytdl_debug_options['no_warnings'] = False
 
 ffmpeg_options = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
@@ -36,13 +45,31 @@ class YTDLSource(discord.PCMVolumeTransformer):
     @classmethod
     async def from_url(cls, url, *, loop=None, stream=True):
         loop = loop or asyncio.get_event_loop()
-        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
+        logger.debug(f"Extracting info for URL: {url}")
+        
+        try:
+            data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
+            logger.debug(f"Successfully extracted info for: {url}")
+        except Exception as e:
+            logger.error(f"Failed to extract info for {url}: {e}")
+            logger.debug(traceback.format_exc())
+            raise
 
         if 'entries' in data:
+            logger.debug(f"Playlist detected, using first entry")
             data = data['entries'][0]
 
         filename = data['url'] if stream else ytdl.prepare_filename(data)
-        return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
+        logger.debug(f"Audio source filename/URL: {filename[:100]}...")
+        
+        try:
+            source = discord.FFmpegPCMAudio(filename, **ffmpeg_options)
+            logger.debug(f"FFmpeg audio source created successfully")
+            return cls(source, data=data)
+        except Exception as e:
+            logger.error(f"Failed to create FFmpeg audio source: {e}")
+            logger.debug(traceback.format_exc())
+            raise
 
 
 class MusicQueue:
@@ -80,7 +107,7 @@ class MusicQueue:
         await asyncio.sleep(delay)
         if vc and vc.is_connected():
             await vc.disconnect()
-            print(f"Auto-disconnected from {vc.guild.name} after inactivity")
+            logger.info(f"Auto-disconnected from {vc.guild.name} after inactivity")
 
 
 queues = {}
@@ -95,59 +122,89 @@ def get_queue(guild_id):
 class MusicCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        logger.info("MusicCog initialized")
 
     @app_commands.command(name="play", description="Play a YouTube URL or search")
     async def play(self, interaction: discord.Interaction, query: str):
+        logger.debug(f"Play command invoked by {interaction.user} in guild {interaction.guild_id}")
         await interaction.response.defer()
 
         if not interaction.user.voice:
+            logger.debug(f"User {interaction.user} not in voice channel")
             await interaction.followup.send("You must be in a voice channel!")
             return
 
         channel = interaction.user.voice.channel
+        logger.debug(f"Target voice channel: {channel.name} (ID: {channel.id})")
 
-        if not interaction.guild.voice_client:
-            vc = await channel.connect()
-        else:
-            vc = interaction.guild.voice_client
+        try:
+            if not interaction.guild.voice_client:
+                logger.debug(f"Connecting to voice channel {channel.name}")
+                vc = await channel.connect()
+                logger.info(f"Connected to voice channel {channel.name} in guild {interaction.guild.name}")
+            else:
+                vc = interaction.guild.voice_client
+                logger.debug(f"Using existing voice client")
+        except Exception as e:
+            logger.error(f"Failed to connect to voice channel: {e}")
+            logger.debug(traceback.format_exc())
+            await interaction.followup.send(f"Error connecting to voice channel: {str(e)}")
+            return
 
         queue = get_queue(interaction.guild_id)
 
         async with interaction.channel.typing():
             try:
+                logger.debug(f"Processing query: {query}")
                 player = await YTDLSource.from_url(query, loop=self.bot.loop)
                 queue.add(player)
+                logger.info(f"Added to queue: {player.title}")
                 await interaction.followup.send(f"Added to queue: {player.title}")
             except Exception as e:
+                logger.error(f"Error processing query '{query}': {e}")
+                logger.debug(traceback.format_exc())
                 await interaction.followup.send(f"Error: {str(e)}")
                 return
 
         if not queue.playing:
+            logger.debug("Starting playback (queue was not playing)")
             await self.play_next(interaction.guild_id, vc)
 
     async def play_next(self, guild_id, vc):
+        logger.debug(f"play_next called for guild {guild_id}")
         queue = get_queue(guild_id)
         source = queue.next()
 
         if not source:
+            logger.debug(f"Queue empty for guild {guild_id}, starting disconnect timer")
             queue.playing = False
             queue.start_disconnect_timer(vc, self.bot.loop)
             return
 
         queue.playing = True
+        logger.info(f"Now playing in guild {guild_id}: {source.title}")
 
         def after_playing(error):
             if error:
-                print(f"Error: {error}")
+                logger.error(f"Playback error in guild {guild_id}: {error}")
+            else:
+                logger.debug(f"Finished playing in guild {guild_id}")
             asyncio.run_coroutine_threadsafe(self.play_next(guild_id, vc), self.bot.loop)
 
-        vc.play(source, after=after_playing)
+        try:
+            vc.play(source, after=after_playing)
+            logger.debug(f"Playback started successfully for guild {guild_id}")
+        except Exception as e:
+            logger.error(f"Error starting playback in guild {guild_id}: {e}")
+            logger.debug(traceback.format_exc())
 
     @app_commands.command(name="skip", description="Skip the current song")
     async def skip(self, interaction: discord.Interaction):
+        logger.debug(f"Skip command invoked by {interaction.user}")
         vc = interaction.guild.voice_client
         if vc and vc.is_playing():
             vc.stop()
+            logger.info(f"Song skipped by {interaction.user}")
             await interaction.response.send_message("Skipped!")
         else:
             await interaction.response.send_message("Nothing playing!")
@@ -183,11 +240,13 @@ class MusicCog(commands.Cog):
 
     @app_commands.command(name="leave", description="Leave the voice channel")
     async def leave(self, interaction: discord.Interaction):
+        logger.debug(f"Leave command invoked by {interaction.user}")
         vc = interaction.guild.voice_client
         if vc:
             queue = get_queue(interaction.guild_id)
             queue._cancel_disconnect()  # Cancel any pending disconnect
             await vc.disconnect()
+            logger.info(f"Left voice channel in guild {interaction.guild.name}")
             await interaction.response.send_message("Left!")
         else:
             await interaction.response.send_message("Not in a voice channel!")
