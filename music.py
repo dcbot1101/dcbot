@@ -23,8 +23,8 @@ ytdl_format_options = {
 }
 
 ffmpeg_options = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn',
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin',
+    'options': '-vn -af volume=0.5',
 }
 
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
@@ -46,8 +46,10 @@ class QueueItem:
 
     async def create_source(self, *, loop):
         data = await loop.run_in_executor(None, lambda: _extract(self.webpage_url))
-        ffmpeg = discord.FFmpegPCMAudio(data['url'], **ffmpeg_options)
-        return discord.PCMVolumeTransformer(ffmpeg, volume=0.5)
+        # FFmpegOpusAudio.from_probe lets FFmpeg encode straight to Opus
+        # (matching the source's bitrate where possible) so Python isn't
+        # in the per-frame encoding path — fewer underruns under load.
+        return await discord.FFmpegOpusAudio.from_probe(data['url'], **ffmpeg_options)
 
 
 class MusicQueue:
