@@ -4,6 +4,7 @@ from discord.ext import commands
 import config
 from music import MusicCog
 import asyncio
+import os
 from aiohttp import web
 import logging
 import sys
@@ -54,7 +55,41 @@ logger.info("=" * 50)
 intents = discord.Intents.default()
 intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+
+class MusicBot(commands.Bot):
+    async def setup_hook(self):
+        # setup_hook runs once during startup, before connecting to the gateway.
+        # on_ready fires on every reconnect, so cog loading and command sync
+        # must NOT live there.
+        try:
+            await self.add_cog(MusicCog(self))
+            logger.info("MusicCog loaded successfully")
+        except Exception as e:
+            logger.error(f"Failed to load MusicCog: {e}")
+            logger.debug(traceback.format_exc())
+            raise
+
+        if config.GUILD_IDS:
+            logger.info(f"Syncing commands to {len(config.GUILD_IDS)} guild(s)...")
+            for guild_id in config.GUILD_IDS:
+                try:
+                    guild = discord.Object(id=guild_id)
+                    await self.tree.sync(guild=guild)
+                    logger.info(f"Commands synced to guild {guild_id}!")
+                except Exception as e:
+                    logger.error(f"Failed to sync commands to guild {guild_id}: {e}")
+                    logger.debug(traceback.format_exc())
+        else:
+            logger.info("Syncing commands globally...")
+            try:
+                await self.tree.sync()
+                logger.info("Commands synced globally!")
+            except Exception as e:
+                logger.error(f"Failed to sync commands globally: {e}")
+                logger.debug(traceback.format_exc())
+
+
+bot = MusicBot(command_prefix="!", intents=intents)
 
 
 async def health_check(request):
@@ -70,7 +105,8 @@ async def run_web():
     app.router.add_get('/', health_check)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    port = int(os.environ.get('PORT', 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
 
@@ -80,35 +116,6 @@ async def on_ready():
     logger.info(f"Connected to {len(bot.guilds)} guild(s)")
     for guild in bot.guilds:
         logger.debug(f"  - {guild.name} (ID: {guild.id})")
-    
-    try:
-        await bot.add_cog(MusicCog(bot))
-        logger.info("MusicCog loaded successfully")
-    except Exception as e:
-        logger.error(f"Failed to load MusicCog: {e}")
-        logger.debug(traceback.format_exc())
-        raise
-    
-    # Sync commands to specific guilds for instant availability
-    if config.GUILD_IDS:
-        logger.info(f"Syncing commands to {len(config.GUILD_IDS)} guild(s)...")
-        for guild_id in config.GUILD_IDS:
-            try:
-                guild = discord.Object(id=guild_id)
-                await bot.tree.sync(guild=guild)
-                logger.info(f"Commands synced to guild {guild_id}!")
-            except Exception as e:
-                logger.error(f"Failed to sync commands to guild {guild_id}: {e}")
-                logger.debug(traceback.format_exc())
-    else:
-        # Fallback to global sync if no guilds specified
-        logger.info("Syncing commands globally...")
-        try:
-            await bot.tree.sync()
-            logger.info("Commands synced globally!")
-        except Exception as e:
-            logger.error(f"Failed to sync commands globally: {e}")
-            logger.debug(traceback.format_exc())
 
 
 @bot.event

@@ -22,54 +22,32 @@ ytdl_format_options = {
     'source_address': '0.0.0.0',
 }
 
-# Debug version with more verbose output
-ytdl_debug_options = ytdl_format_options.copy()
-ytdl_debug_options['quiet'] = False
-ytdl_debug_options['no_warnings'] = False
-
 ffmpeg_options = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn -filter:a volume=0.5',
+    'options': '-vn',
 }
 
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
 
 
-class YTDLSource(discord.PCMVolumeTransformer):
-    def __init__(self, source, *, data, volume=0.5):
-        super().__init__(source, volume)
-        self.data = data
-        self.title = data.get('title')
-        self.url = data.get('url')
+def _extract(query):
+    data = ytdl.extract_info(query, download=False)
+    if 'entries' in data:
+        data = data['entries'][0]
+    return data
 
-    @classmethod
-    async def from_url(cls, url, *, loop=None, stream=True):
-        loop = loop or asyncio.get_event_loop()
-        logger.debug(f"Extracting info for URL: {url}")
-        
-        try:
-            data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
-            logger.debug(f"Successfully extracted info for: {url}")
-        except Exception as e:
-            logger.error(f"Failed to extract info for {url}: {e}")
-            logger.debug(traceback.format_exc())
-            raise
 
-        if 'entries' in data:
-            logger.debug(f"Playlist detected, using first entry")
-            data = data['entries'][0]
+class QueueItem:
+    # Holds the canonical webpage URL and title. The CDN stream URL is fetched
+    # lazily at playback time so it doesn't expire while sitting in the queue.
+    def __init__(self, *, title, webpage_url):
+        self.title = title
+        self.webpage_url = webpage_url
 
-        filename = data['url'] if stream else ytdl.prepare_filename(data)
-        logger.debug(f"Audio source filename/URL: {filename[:100]}...")
-        
-        try:
-            source = discord.FFmpegPCMAudio(filename, **ffmpeg_options)
-            logger.debug(f"FFmpeg audio source created successfully")
-            return cls(source, data=data)
-        except Exception as e:
-            logger.error(f"Failed to create FFmpeg audio source: {e}")
-            logger.debug(traceback.format_exc())
-            raise
+    async def create_source(self, *, loop):
+        data = await loop.run_in_executor(None, lambda: _extract(self.webpage_url))
+        ffmpeg = discord.FFmpegPCMAudio(data['url'], **ffmpeg_options)
+        return discord.PCMVolumeTransformer(ffmpeg, volume=0.5)
 
 
 class MusicQueue:
@@ -80,14 +58,15 @@ class MusicQueue:
         self.disconnect_task = None
         self.voice_client = None
 
-    def add(self, source):
-        self.queue.append(source)
+    def add(self, item):
+        self.queue.append(item)
         self._cancel_disconnect()
 
     def next(self):
         if self.queue:
             self.current = self.queue.pop(0)
             return self.current
+        self.current = None
         return None
 
     def start_disconnect_timer(self, vc, loop):
@@ -97,17 +76,16 @@ class MusicQueue:
         self.disconnect_task = loop.create_task(self._disconnect_after_delay(vc))
 
     def _cancel_disconnect(self):
-        """Cancel the disconnect timer if it exists"""
         if self.disconnect_task and not self.disconnect_task.done():
             self.disconnect_task.cancel()
             self.disconnect_task = None
 
     async def _disconnect_after_delay(self, vc, delay=300):
-        """Disconnect from voice channel after delay seconds (default 5 minutes)"""
         await asyncio.sleep(delay)
         if vc and vc.is_connected():
             await vc.disconnect()
             logger.info(f"Auto-disconnected from {vc.guild.name} after inactivity")
+            queues.pop(vc.guild.id, None)
 
 
 queues = {}
@@ -156,10 +134,14 @@ class MusicCog(commands.Cog):
         async with interaction.channel.typing():
             try:
                 logger.debug(f"Processing query: {query}")
-                player = await YTDLSource.from_url(query, loop=self.bot.loop)
-                queue.add(player)
-                logger.info(f"Added to queue: {player.title}")
-                await interaction.followup.send(f"Added to queue: {player.title}")
+                data = await self.bot.loop.run_in_executor(None, lambda: _extract(query))
+                item = QueueItem(
+                    title=data.get('title') or query,
+                    webpage_url=data.get('webpage_url') or query,
+                )
+                queue.add(item)
+                logger.info(f"Added to queue: {item.title}")
+                await interaction.followup.send(f"Added to queue: {item.title}")
             except Exception as e:
                 logger.error(f"Error processing query '{query}': {e}")
                 logger.debug(traceback.format_exc())
@@ -173,16 +155,25 @@ class MusicCog(commands.Cog):
     async def play_next(self, guild_id, vc):
         logger.debug(f"play_next called for guild {guild_id}")
         queue = get_queue(guild_id)
-        source = queue.next()
+        item = queue.next()
 
-        if not source:
+        if not item:
             logger.debug(f"Queue empty for guild {guild_id}, starting disconnect timer")
             queue.playing = False
             queue.start_disconnect_timer(vc, self.bot.loop)
             return
 
         queue.playing = True
-        logger.info(f"Now playing in guild {guild_id}: {source.title}")
+
+        try:
+            source = await item.create_source(loop=self.bot.loop)
+        except Exception as e:
+            logger.error(f"Failed to resolve '{item.title}' for playback: {e}")
+            logger.debug(traceback.format_exc())
+            await self.play_next(guild_id, vc)
+            return
+
+        logger.info(f"Now playing in guild {guild_id}: {item.title}")
 
         def after_playing(error):
             if error:
@@ -222,7 +213,7 @@ class MusicCog(commands.Cog):
             embed.add_field(name="Now Playing", value=f"{queue.current.title}", inline=False)
 
         for i, item in enumerate(queue.queue, 1):
-            embed.add_field(name=f"{i}. {item.title}", value="\u200b", inline=False)
+            embed.add_field(name=f"{i}. {item.title}", value="​", inline=False)
 
         await interaction.response.send_message(embed=embed)
 
@@ -230,12 +221,11 @@ class MusicCog(commands.Cog):
     async def clear(self, interaction: discord.Interaction):
         queue = get_queue(interaction.guild_id)
         queue.queue.clear()
-        
-        # If nothing is playing, start disconnect timer
+
         vc = interaction.guild.voice_client
         if vc and not queue.playing:
             queue.start_disconnect_timer(vc, self.bot.loop)
-        
+
         await interaction.response.send_message("Queue cleared!")
 
     @app_commands.command(name="leave", description="Leave the voice channel")
@@ -244,8 +234,9 @@ class MusicCog(commands.Cog):
         vc = interaction.guild.voice_client
         if vc:
             queue = get_queue(interaction.guild_id)
-            queue._cancel_disconnect()  # Cancel any pending disconnect
+            queue._cancel_disconnect()
             await vc.disconnect()
+            queues.pop(interaction.guild_id, None)
             logger.info(f"Left voice channel in guild {interaction.guild.name}")
             await interaction.response.send_message("Left!")
         else:
