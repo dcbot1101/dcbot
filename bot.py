@@ -52,8 +52,10 @@ logger.info(f"Python version: {sys.version}")
 logger.info(f"Discord.py version: {discord.__version__}")
 logger.info("=" * 50)
 
+# Slash-command-only bot: Intents.default() already covers guilds + voice_states,
+# which is all we need. message_content is a PRIVILEGED intent and was never used
+# (there are no on_message / prefix-command handlers), so we don't request it.
 intents = discord.Intents.default()
-intents.message_content = True
 
 
 class MusicBot(commands.Bot):
@@ -74,6 +76,10 @@ class MusicBot(commands.Bot):
             for guild_id in config.GUILD_IDS:
                 try:
                     guild = discord.Object(id=guild_id)
+                    # Cog app commands register GLOBALLY. Without copy_global_to,
+                    # tree.sync(guild=...) uploads an empty payload (and clears
+                    # that guild's commands) — so the commands never appear.
+                    self.tree.copy_global_to(guild=guild)
                     await self.tree.sync(guild=guild)
                     logger.info(f"Commands synced to guild {guild_id}!")
                 except Exception as e:
