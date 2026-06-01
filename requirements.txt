@@ -2,4 +2,3 @@ discord.py>=2.0
 yt-dlp
 python-dotenv
 pynacl
-aiohttp

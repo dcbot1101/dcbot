@@ -4,8 +4,6 @@ from discord.ext import commands
 import config
 from music import MusicCog
 import asyncio
-import os
-from aiohttp import web
 import logging
 import sys
 import traceback
@@ -98,22 +96,8 @@ class MusicBot(commands.Bot):
 bot = MusicBot(command_prefix="!", intents=intents)
 
 
-async def health_check(request):
-    return web.Response(text="OK")
-
-
 async def run_bot():
     await bot.start(config.DISCORD_TOKEN)
-
-
-async def run_web():
-    app = web.Application()
-    app.router.add_get('/', health_check)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get('PORT', 8080))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
 
 
 @bot.event
@@ -155,7 +139,7 @@ async def on_resumed():
 
 async def main():
     try:
-        await asyncio.gather(run_web(), run_bot())
+        await run_bot()
     except Exception as e:
         logger.critical(f"Fatal error in main: {e}")
         logger.critical(traceback.format_exc())
