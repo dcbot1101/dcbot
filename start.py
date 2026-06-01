@@ -381,6 +381,8 @@ def main():
         # Hard-reset to origin/main rather than pull so history rewrites
         # on the remote self-heal here. Any local edits to tracked files
         # are discarded — .env, venv/, and logs are gitignored and stay.
+        # SAFETY: refuse the reset if the working tree is dirty, so we never
+        # silently destroy uncommitted edits to tracked files.
         try:
             fetch = subprocess.run(["git", "fetch", "origin"], capture_output=True, text=True)
             if DEBUG_MODE:
@@ -390,8 +392,18 @@ def main():
                 if fetch.stderr:
                     log_debug(f"Git fetch stderr: {fetch.stderr}", debug_log)
 
+            dirty = subprocess.run(
+                ["git", "status", "--porcelain"], capture_output=True, text=True,
+            )
+            has_local_changes = dirty.returncode == 0 and dirty.stdout.strip() != ""
+
             if fetch.returncode != 0:
                 print_status("Could not fetch updates (this is OK)", "warning")
+            elif has_local_changes:
+                print_status("Local changes detected — skipping auto-update to avoid", "warning")
+                print_status("discarding them. Commit/stash them to get updates.", "warning")
+                if DEBUG_MODE:
+                    log_debug(f"Skipping hard reset; dirty tree:\n{dirty.stdout}", debug_log)
             else:
                 reset = subprocess.run(
                     ["git", "reset", "--hard", "origin/main"],

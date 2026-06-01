@@ -53,7 +53,7 @@ The launcher (`start.py` / `start.bat`) automatically:
 2. ✅ **Checks .env file** - Prompts to create if missing (asks for your Discord token)
 3. ✅ **Creates virtual environment** - Sets up Python venv if needed
 4. ✅ **Installs packages** - Installs/updates requirements.txt
-5. ✅ **Checks for updates** - Runs `git pull` if this is a git repo
+5. ✅ **Checks for updates** - Hard-resets to `origin/main` if this is a git repo (skipped automatically if you have uncommitted local changes, so your edits are never discarded)
 6. ✅ **Runs the bot** - Starts the Discord bot
 7. ✅ **Handles errors** - Shows clear error messages and pauses
 
